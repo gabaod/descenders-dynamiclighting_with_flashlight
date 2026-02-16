@@ -8,9 +8,19 @@ public class DynamicLightingZone : ModBehaviour
     public string trackedObjectName = "Player_Human"; // Name of the object to track
     public Light sunLight;
 
-    [Header("Zone Settings")]
+    [Header("Zone Type Selection")]
+    public bool useRadius = true; // If true, use radius. If false, use rectangular zone
+
+    [Header("Radius Zone Settings (if useRadius = true)")]
     public float darkZoneRadius = 100f;
     public float transitionWidth = 20f; // Smooth transition buffer
+
+    [Header("Rectangular Zone Settings (if useRadius = false)")]
+    public float zoneStartX = 0f;
+    public float zoneEndX = 500f;
+    public float zoneStartZ = 0f;
+    public float zoneEndZ = 500f;
+    public float zoneTransitionWidth = 20f; // Transition buffer outside rectangle
 
     [Header("Dark Zone Lighting")]
     public Color darkAmbientColor = new Color(0.1f, 0.1f, 0.15f);
@@ -56,9 +66,19 @@ public class DynamicLightingZone : ModBehaviour
     public bool onlyInDarkZone = true; // Only enable flashlight in dark zone
     public bool flashlightCastsShadows = true;
 
+    [Header("Flashlight Flicker Settings")]
+    public bool enableFlicker = false;
+    public float flickerSpeed = 0.1f; // How fast it flickers (lower = faster)
+    public float flickerMinIntensity = 0.5f; // Minimum intensity multiplier (0.5 = 50% of normal)
+    public float flickerMaxIntensity = 1.0f; // Maximum intensity multiplier (1.0 = 100% of normal)
+    public bool useRandomFlicker = true; // Use random flicker vs smooth sine wave
+    public float flickerSmoothness = 5f; // How smooth the transitions are (higher = smoother)
+    public float completeFlickerOffChance = 0.05f; // Chance per second the light completely turns off briefly (0-1)
+    public float completeFlickerOffDuration = 0.1f; // How long the light stays completely off (seconds)
+
     [Header("Debug")]
     public bool showDebugInfo = true;
-    public bool showFlashlightDebug = true;
+    public bool showFlashlightDebug = false;
     public float debugLogInterval = 2.0f; // Log every N seconds instead of every frame
 
     private float currentBlend = 0f;
@@ -75,9 +95,17 @@ public class DynamicLightingZone : ModBehaviour
     private bool hasSetupFlashlight = false;
     private float lastDebugLogTime = 0f;
 
+    // Flicker variables
+    private float flickerTime = 0f;
+    private float targetFlickerIntensity = 1f;
+    private float currentFlickerIntensity = 1f;
+    private bool isCompletelyOff = false;
+    private float completeOffTimer = 0f;
+
     void Start()
     {
         Debug.Log("=== DynamicLightingZone Start ===");
+        Debug.Log("Zone Type: " + (useRadius ? "RADIUS" : "RECTANGULAR"));
 
         // Cache the startline transform reference
         if (startLine != null)
@@ -298,6 +326,44 @@ public class DynamicLightingZone : ModBehaviour
         hasStoredOriginals = true;
     }
 
+    // Calculate distance from point to rectangular zone
+    float CalculateDistanceToRectangle(Vector3 point)
+    {
+        float x = point.x;
+        float z = point.z;
+
+        // Check if point is inside rectangle
+        if (x >= zoneStartX && x <= zoneEndX && z >= zoneStartZ && z <= zoneEndZ)
+        {
+            return 0f; // Inside the zone
+        }
+
+        // Calculate distance to nearest edge
+        float dx = 0f;
+        float dz = 0f;
+
+        if (x < zoneStartX)
+        {
+            dx = zoneStartX - x;
+        }
+        else if (x > zoneEndX)
+        {
+            dx = x - zoneEndX;
+        }
+
+        if (z < zoneStartZ)
+        {
+            dz = zoneStartZ - z;
+        }
+        else if (z > zoneEndZ)
+        {
+            dz = z - zoneEndZ;
+        }
+
+        // Return the distance (Pythagorean if outside corner, otherwise just the perpendicular distance)
+        return Mathf.Sqrt(dx * dx + dz * dz);
+    }
+
     void Update()
     {
         // If we haven't found the tracked object yet, keep trying
@@ -310,12 +376,6 @@ public class DynamicLightingZone : ModBehaviour
             }
         }
 
-        if (startLineTransform == null)
-        {
-            Debug.LogWarning("StartLine transform is null!");
-            return;
-        }
-
         if (trackedTransform == null)
         {
             Debug.LogWarning("Tracked object transform is null!");
@@ -323,29 +383,56 @@ public class DynamicLightingZone : ModBehaviour
             return;
         }
 
-        // Calculate distance from the tracked object to the startline
-        float distance = Vector3.Distance(trackedTransform.position, startLineTransform.position);
+        // Calculate distance based on zone type
+        float distance;
+
+        if (useRadius)
+        {
+            // Original radius-based calculation
+            if (startLineTransform == null)
+            {
+                Debug.LogWarning("StartLine transform is null!");
+                return;
+            }
+            distance = Vector3.Distance(trackedTransform.position, startLineTransform.position);
+        }
+        else
+        {
+            // Rectangular zone calculation
+            distance = CalculateDistanceToRectangle(trackedTransform.position);
+        }
 
         // Periodic debug logging (not every frame)
         bool shouldLog = Time.time - lastDebugLogTime > debugLogInterval;
 
         if (showDebugInfo && shouldLog)
         {
-            Debug.Log("Distance from startline: " + distance.ToString("F2") + "m | Current blend: " + currentBlend.ToString("F2"));
+            if (useRadius)
+            {
+                Debug.Log("RADIUS MODE - Distance from startline: " + distance.ToString("F2") + "m | Current blend: " + currentBlend.ToString("F2"));
+            }
+            else
+            {
+                Debug.Log("RECTANGLE MODE - Distance from zone: " + distance.ToString("F2") + "m | Current blend: " + currentBlend.ToString("F2"));
+                Debug.Log("Player Position: X=" + trackedTransform.position.x.ToString("F1") + " Z=" + trackedTransform.position.z.ToString("F1"));
+            }
             lastDebugLogTime = Time.time;
         }
 
         // Calculate blend factor (0 = dark zone, 1 = normal zone)
         float targetBlend;
-        if (distance < darkZoneRadius)
+        float activeTransitionWidth = useRadius ? transitionWidth : zoneTransitionWidth;
+        float activeDarkZoneSize = useRadius ? darkZoneRadius : 0f; // Rectangle uses 0 as "inside"
+
+        if (distance < activeDarkZoneSize)
         {
-            // Inside dark zone
+            // Inside dark zone (only applies to radius mode)
             targetBlend = 0f;
         }
-        else if (distance < darkZoneRadius + transitionWidth)
+        else if (distance < activeDarkZoneSize + activeTransitionWidth)
         {
             // In transition zone
-            targetBlend = (distance - darkZoneRadius) / transitionWidth;
+            targetBlend = (distance - activeDarkZoneSize) / activeTransitionWidth;
         }
         else
         {
@@ -402,6 +489,58 @@ public class DynamicLightingZone : ModBehaviour
         }
     }
 
+    float CalculateFlickerIntensity()
+    {
+        if (!enableFlicker)
+        {
+            return 1f; // No flicker, full intensity
+        }
+
+        // Handle complete flicker off (dying battery effect)
+        if (isCompletelyOff)
+        {
+            completeOffTimer -= Time.deltaTime;
+            if (completeOffTimer <= 0f)
+            {
+                isCompletelyOff = false;
+            }
+            return 0f; // Completely off
+        }
+
+        // Random chance to completely flicker off
+        if (completeFlickerOffChance > 0f && Random.value < completeFlickerOffChance * Time.deltaTime)
+        {
+            isCompletelyOff = true;
+            completeOffTimer = completeFlickerOffDuration;
+            return 0f;
+        }
+
+        // Update flicker time
+        flickerTime += Time.deltaTime;
+
+        if (useRandomFlicker)
+        {
+            // Random flicker - pick new random target periodically
+            if (flickerTime >= flickerSpeed)
+            {
+                flickerTime = 0f;
+                targetFlickerIntensity = Random.Range(flickerMinIntensity, flickerMaxIntensity);
+            }
+
+            // Smoothly interpolate to target
+            currentFlickerIntensity = Mathf.Lerp(currentFlickerIntensity, targetFlickerIntensity, Time.deltaTime * flickerSmoothness);
+        }
+        else
+        {
+            // Smooth sine wave flicker
+            float sineValue = Mathf.Sin(flickerTime / flickerSpeed);
+            // Map sine wave from [-1, 1] to [flickerMinIntensity, flickerMaxIntensity]
+            currentFlickerIntensity = Mathf.Lerp(flickerMinIntensity, flickerMaxIntensity, (sineValue + 1f) * 0.5f);
+        }
+
+        return currentFlickerIntensity;
+    }
+
     void UpdateFlashlight(float blend, bool shouldLog)
     {
         if (!useFlashlight || flashlight == null)
@@ -420,8 +559,30 @@ public class DynamicLightingZone : ModBehaviour
         Quaternion rotation = Quaternion.Euler(flashlightRotationX, flashlightRotationY, flashlightRotationZ);
         flashlightObject.transform.localRotation = rotation;
 
-        // Update flashlight properties in case they changed in inspector
-        flashlight.intensity = flashlightIntensity;
+        // Calculate flicker multiplier
+        float flickerMultiplier = CalculateFlickerIntensity();
+
+        // ALWAYS log flicker info when flicker is enabled
+        if (enableFlicker && showFlashlightDebug && shouldLog)
+        {
+            Debug.Log("=== FLICKER DEBUG ===");
+            Debug.Log("  Enable Flicker: " + enableFlicker);
+            Debug.Log("  Flicker Multiplier: " + flickerMultiplier.ToString("F3"));
+            Debug.Log("  Is Completely Off: " + isCompletelyOff);
+            Debug.Log("  Complete Off Timer: " + completeOffTimer.ToString("F2"));
+            Debug.Log("  Flicker Time: " + flickerTime.ToString("F2"));
+            Debug.Log("  Use Random Flicker: " + useRandomFlicker);
+            Debug.Log("  Current Flicker Intensity: " + currentFlickerIntensity.ToString("F3"));
+            Debug.Log("  Target Flicker Intensity: " + targetFlickerIntensity.ToString("F3"));
+            Debug.Log("  Flicker Speed: " + flickerSpeed);
+            Debug.Log("  Min Intensity: " + flickerMinIntensity);
+            Debug.Log("  Max Intensity: " + flickerMaxIntensity);
+        }
+
+        // Update flashlight properties with flicker applied
+        float baseIntensity = flashlightIntensity;
+        float finalIntensity = baseIntensity * flickerMultiplier;
+        flashlight.intensity = finalIntensity;
         flashlight.range = flashlightRange;
         flashlight.spotAngle = flashlightSpotAngle;
         flashlight.color = flashlightColor;
@@ -437,14 +598,19 @@ public class DynamicLightingZone : ModBehaviour
             shouldBeEnabled = true; // Always on
         }
 
-        flashlight.enabled = shouldBeEnabled;
+        // Apply flicker to enabled state - if flickered to 0, disable the light
+        bool finalEnabled = shouldBeEnabled && (flickerMultiplier > 0.01f);
+        flashlight.enabled = finalEnabled;
 
         if (showFlashlightDebug && shouldLog)
         {
             Debug.Log("=== Flashlight Status ===");
             Debug.Log("  Enabled: " + flashlight.enabled);
-            Debug.Log("  Should be enabled: " + shouldBeEnabled);
-            Debug.Log("  Intensity: " + flashlight.intensity);
+            Debug.Log("  Should be enabled (zone): " + shouldBeEnabled);
+            Debug.Log("  Final enabled (with flicker): " + finalEnabled);
+            Debug.Log("  Base Intensity: " + baseIntensity);
+            Debug.Log("  Flicker Multiplier: " + flickerMultiplier.ToString("F3"));
+            Debug.Log("  Final Intensity: " + finalIntensity);
             Debug.Log("  Range: " + flashlight.range);
             Debug.Log("  Current blend: " + blend.ToString("F2"));
             Debug.Log("  Local Position: " + flashlightObject.transform.localPosition);
@@ -458,29 +624,66 @@ public class DynamicLightingZone : ModBehaviour
     // Visualize the zone in editor
     void OnDrawGizmos()
     {
-        if (startLine != null)
+        if (useRadius)
         {
-            // Dark zone
+            // Draw radius zones
+            if (startLine != null)
+            {
+                // Dark zone
+                Gizmos.color = new Color(0.5f, 0f, 0f, 0.3f);
+                Gizmos.DrawWireSphere(startLine.transform.position, darkZoneRadius);
+
+                // Transition zone
+                Gizmos.color = new Color(1f, 0.5f, 0f, 0.3f);
+                Gizmos.DrawWireSphere(startLine.transform.position, darkZoneRadius + transitionWidth);
+            }
+        }
+        else
+        {
+            // Draw rectangular zone
             Gizmos.color = new Color(0.5f, 0f, 0f, 0.3f);
-            Gizmos.DrawWireSphere(startLine.transform.position, darkZoneRadius);
 
-            // Transition zone
+            // Draw the dark zone rectangle
+            Vector3 corner1 = new Vector3(zoneStartX, 0, zoneStartZ);
+            Vector3 corner2 = new Vector3(zoneEndX, 0, zoneStartZ);
+            Vector3 corner3 = new Vector3(zoneEndX, 0, zoneEndZ);
+            Vector3 corner4 = new Vector3(zoneStartX, 0, zoneEndZ);
+
+            Gizmos.DrawLine(corner1, corner2);
+            Gizmos.DrawLine(corner2, corner3);
+            Gizmos.DrawLine(corner3, corner4);
+            Gizmos.DrawLine(corner4, corner1);
+
+            // Draw transition zone rectangle
             Gizmos.color = new Color(1f, 0.5f, 0f, 0.3f);
-            Gizmos.DrawWireSphere(startLine.transform.position, darkZoneRadius + transitionWidth);
+            float buffer = zoneTransitionWidth;
 
-            // Line from tracked object to startline
-            if (hasFoundTrackedObject && trackedTransform != null && Application.isPlaying)
+            Vector3 outer1 = new Vector3(zoneStartX - buffer, 0, zoneStartZ - buffer);
+            Vector3 outer2 = new Vector3(zoneEndX + buffer, 0, zoneStartZ - buffer);
+            Vector3 outer3 = new Vector3(zoneEndX + buffer, 0, zoneEndZ + buffer);
+            Vector3 outer4 = new Vector3(zoneStartX - buffer, 0, zoneEndZ + buffer);
+
+            Gizmos.DrawLine(outer1, outer2);
+            Gizmos.DrawLine(outer2, outer3);
+            Gizmos.DrawLine(outer3, outer4);
+            Gizmos.DrawLine(outer4, outer1);
+        }
+
+        // Common gizmos for both modes
+        if (hasFoundTrackedObject && trackedTransform != null && Application.isPlaying)
+        {
+            if (useRadius && startLine != null)
             {
                 Gizmos.color = Color.yellow;
                 Gizmos.DrawLine(trackedTransform.position, startLine.transform.position);
+            }
 
-                // Visualize flashlight position and direction
-                if (useFlashlight && flashlightObject != null)
-                {
-                    Gizmos.color = Color.cyan;
-                    Gizmos.DrawWireSphere(flashlightObject.transform.position, 0.5f);
-                    Gizmos.DrawRay(flashlightObject.transform.position, flashlightObject.transform.forward * (flashlight != null ? flashlight.range : flashlightRange));
-                }
+            // Visualize flashlight position and direction
+            if (useFlashlight && flashlightObject != null)
+            {
+                Gizmos.color = Color.cyan;
+                Gizmos.DrawWireSphere(flashlightObject.transform.position, 0.5f);
+                Gizmos.DrawRay(flashlightObject.transform.position, flashlightObject.transform.forward * (flashlight != null ? flashlight.range : flashlightRange));
             }
         }
     }
