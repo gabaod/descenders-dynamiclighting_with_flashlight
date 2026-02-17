@@ -16,23 +16,32 @@ public class DynamicLightingZone : ModBehaviour
     public float transitionWidth = 20f; // Smooth transition buffer
 
     [Header("Rectangular Zone Settings (if useRadius = false)")]
-    public float zoneStartX = 0f;
-    public float zoneEndX = 500f;
-    public float zoneStartZ = 0f;
-    public float zoneEndZ = 500f;
+    public float zoneStartX = -50f;
+    public float zoneEndX = 50f;
+    public float zoneStartZ = -50f;
+    public float zoneEndZ = 50f;
     public float zoneTransitionWidth = 20f; // Transition buffer outside rectangle
+
+    [Header("Skybox Control Method")]
+    public bool useSkyboxMaterials = true; // If true, use materials. If false, use GameObject
+
+    [Header("Skybox Materials (if useSkyboxMaterials = true)")]
+    public Material darkSkybox;
+    public Material normalSkybox;
+
+    [Header("Skybox GameObject (if useSkyboxMaterials = false)")]
+    public GameObject darkSkyboxControllerObject; // GameObject for dark skybox
+    public GameObject normalSkyboxControllerObject; // GameObject for normal skybox
 
     [Header("Dark Zone Lighting")]
     public Color darkAmbientColor = new Color(0.1f, 0.1f, 0.15f);
     public float darkSunIntensity = 0.1f;
     public Color darkSunColor = new Color(0.3f, 0.3f, 0.4f);
-    public Material darkSkybox;
 
     [Header("Normal Zone Lighting")]
     public Color normalAmbientColor = new Color(0.5f, 0.5f, 0.5f);
     public float normalSunIntensity = 1.0f;
     public Color normalSunColor = Color.white;
-    public Material normalSkybox;
 
     [Header("Fog Settings")]
     public bool useFogInDarkZone = true;
@@ -94,6 +103,7 @@ public class DynamicLightingZone : ModBehaviour
     private bool hasFoundTrackedObject = false;
     private bool hasSetupFlashlight = false;
     private float lastDebugLogTime = 0f;
+    private bool currentSkyboxIsDark = false; // Track current skybox state for GameObject method
 
     // Flicker variables
     private float flickerTime = 0f;
@@ -106,6 +116,7 @@ public class DynamicLightingZone : ModBehaviour
     {
         Debug.Log("=== DynamicLightingZone Start ===");
         Debug.Log("Zone Type: " + (useRadius ? "RADIUS" : "RECTANGULAR"));
+        Debug.Log("Skybox Control: " + (useSkyboxMaterials ? "MATERIALS" : "GAMEOBJECT"));
 
         // Cache the startline transform reference
         if (startLine != null)
@@ -116,6 +127,28 @@ public class DynamicLightingZone : ModBehaviour
         else
         {
             Debug.LogError("StartLine GameObject reference is missing!");
+        }
+
+        // Check skybox controller if using GameObject method
+        if (!useSkyboxMaterials)
+        {
+            if (darkSkyboxControllerObject != null)
+            {
+                Debug.Log("Dark Skybox Controller Object assigned: " + darkSkyboxControllerObject.name);
+            }
+            else
+            {
+                Debug.LogError("Dark Skybox Controller Object is NULL - please assign it in the inspector!");
+            }
+
+            if (normalSkyboxControllerObject != null)
+            {
+                Debug.Log("Normal Skybox Controller Object assigned: " + normalSkyboxControllerObject.name);
+            }
+            else
+            {
+                Debug.LogError("Normal Skybox Controller Object is NULL - please assign it in the inspector!");
+            }
         }
 
         // Check flashlight object
@@ -173,7 +206,7 @@ public class DynamicLightingZone : ModBehaviour
         }
 
         // Validate all required references
-        if (darkSkybox == null)
+        if (useSkyboxMaterials && darkSkybox == null)
         {
             Debug.LogWarning("Dark skybox material not assigned!");
         }
@@ -307,11 +340,11 @@ public class DynamicLightingZone : ModBehaviour
     void StoreOriginalLighting()
     {
         // If normal values aren't set, use current scene values
-        if (normalSkybox == null)
+        if (useSkyboxMaterials && normalSkybox == null)
         {
             storedNormalSkybox = RenderSettings.skybox;
         }
-        else
+        else if (useSkyboxMaterials)
         {
             storedNormalSkybox = normalSkybox;
         }
@@ -462,18 +495,77 @@ public class DynamicLightingZone : ModBehaviour
             sunLight.color = Color.Lerp(darkSunColor, storedNormalSunColor, blend);
         }
 
-        // Blend skybox (switch at midpoint)
-        if (darkSkybox != null && storedNormalSkybox != null)
+        // Handle skybox switching based on method
+        if (useSkyboxMaterials)
         {
-            if (blend < 0.5f && RenderSettings.skybox != darkSkybox)
+            // Original material-based method
+            if (darkSkybox != null && storedNormalSkybox != null)
             {
-                RenderSettings.skybox = darkSkybox;
-                DynamicGI.UpdateEnvironment();
+                if (blend < 0.5f && RenderSettings.skybox != darkSkybox)
+                {
+                    RenderSettings.skybox = darkSkybox;
+                    DynamicGI.UpdateEnvironment();
+                }
+                else if (blend >= 0.5f && RenderSettings.skybox != storedNormalSkybox)
+                {
+                    RenderSettings.skybox = storedNormalSkybox;
+                    DynamicGI.UpdateEnvironment();
+                }
             }
-            else if (blend >= 0.5f && RenderSettings.skybox != storedNormalSkybox)
+        }
+        else
+        {
+            // GameObject method - activate/deactivate controllers AND apply materials
+            bool shouldBeDark = blend < 0.5f;
+
+            // Only change state when needed
+            if (shouldBeDark && !currentSkyboxIsDark)
             {
-                RenderSettings.skybox = storedNormalSkybox;
-                DynamicGI.UpdateEnvironment();
+                // Switch to dark skybox
+                if (darkSkyboxControllerObject != null)
+                {
+                    darkSkyboxControllerObject.SetActive(true);
+                    Debug.Log("Activated dark skybox controller: " + darkSkyboxControllerObject.name);
+                }
+                if (normalSkyboxControllerObject != null)
+                {
+                    normalSkyboxControllerObject.SetActive(false);
+                    Debug.Log("Deactivated normal skybox controller: " + normalSkyboxControllerObject.name);
+                }
+
+                // Apply the dark skybox material if defined
+                if (darkSkybox != null)
+                {
+                    RenderSettings.skybox = darkSkybox;
+                    DynamicGI.UpdateEnvironment();
+                    Debug.Log("Applied dark skybox material: " + darkSkybox.name);
+                }
+
+                currentSkyboxIsDark = true;
+            }
+            else if (!shouldBeDark && currentSkyboxIsDark)
+            {
+                // Switch to normal skybox
+                if (normalSkyboxControllerObject != null)
+                {
+                    normalSkyboxControllerObject.SetActive(true);
+                    Debug.Log("Activated normal skybox controller: " + normalSkyboxControllerObject.name);
+                }
+                if (darkSkyboxControllerObject != null)
+                {
+                    darkSkyboxControllerObject.SetActive(false);
+                    Debug.Log("Deactivated dark skybox controller: " + darkSkyboxControllerObject.name);
+                }
+
+                // Apply the normal skybox material if defined
+                if (normalSkybox != null)
+                {
+                    RenderSettings.skybox = normalSkybox;
+                    DynamicGI.UpdateEnvironment();
+                    Debug.Log("Applied normal skybox material: " + normalSkybox.name);
+                }
+
+                currentSkyboxIsDark = false;
             }
         }
 
